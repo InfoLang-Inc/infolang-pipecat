@@ -1,0 +1,74 @@
+name: publish
+
+# Publish to PyPI on a pushed semver tag (v*) or a published GitHub Release.
+#
+# Credentials — configure exactly ONE before the first real release:
+#   * PRIMARY  — PyPI Trusted Publishing (OIDC). Configure a trusted publisher on
+#     PyPI for this repository + the `pypi` environment, then set the repository
+#     variable PUBLISH_ENABLED=true. No secret is required (uses id-token: write).
+#   * FALLBACK — API token. Add the repository secret PYPI_API_TOKEN; the job
+#     detects it and authenticates with the token instead of OIDC.
+#
+# If NEITHER is configured the workflow no-ops (skips) instead of failing, so an
+# unconfigured repository never produces a red build.
+on:
+  push:
+    tags:
+      - "v*"
+  release:
+    types: [published]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  guard:
+    runs-on: ubuntu-latest
+    outputs:
+      publish: ${{ steps.decide.outputs.publish }}
+      has_token: ${{ steps.decide.outputs.has_token }}
+    steps:
+      - id: decide
+        env:
+          PYPI_API_TOKEN: ${{ secrets.PYPI_API_TOKEN }}
+          PUBLISH_ENABLED: ${{ vars.PUBLISH_ENABLED }}
+        run: |
+          if [ -n "${PYPI_API_TOKEN}" ]; then
+            echo "has_token=true" >> "$GITHUB_OUTPUT"
+            echo "publish=true" >> "$GITHUB_OUTPUT"
+            echo "PYPI_API_TOKEN detected -> publishing via API token."
+          elif [ "${PUBLISH_ENABLED}" = "true" ]; then
+            echo "has_token=false" >> "$GITHUB_OUTPUT"
+            echo "publish=true" >> "$GITHUB_OUTPUT"
+            echo "vars.PUBLISH_ENABLED=true -> publishing via PyPI trusted publishing (OIDC)."
+          else
+            echo "has_token=false" >> "$GITHUB_OUTPUT"
+            echo "publish=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::No PyPI credentials configured (set repo variable PUBLISH_ENABLED=true for trusted publishing, or add secret PYPI_API_TOKEN). Skipping publish."
+          fi
+
+  publish:
+    needs: guard
+    if: needs.guard.outputs.publish == 'true'
+    runs-on: ubuntu-latest
+    environment: pypi
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Build sdist + wheel
+        run: |
+          python -m pip install -U pip build twine
+          python -m build
+          python -m twine check dist/*
+      - name: Publish to PyPI (trusted publishing / OIDC)
+        if: needs.guard.outputs.has_token != 'true'
+        uses: pypa/gh-action-pypi-publish@release/v1
+      - name: Publish to PyPI (API token)
+        if: needs.guard.outputs.has_token == 'true'
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          password: ${{ secrets.PYPI_API_TOKEN }}
